@@ -5,14 +5,19 @@ import pandas as pd
 import os
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup, \
+    Update
 from aiogram.types.input_file import FSInputFile
 from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiohttp import web
 
-API_TOKEN = os.getenv("TELEGRAM_TOKEN")  # токен через переменные окружения
+API_TOKEN = os.getenv("TELEGRAM_TOKEN")
+WEBHOOK_PATH = f"/webhook/{API_TOKEN}"
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "secret-key")
+RENDER_HOST = os.getenv("RENDER_EXTERNAL_HOSTNAME")
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -415,8 +420,53 @@ async def reset_user_data(message: Message):
 # ----------------------
 # Запуск
 # ----------------------
-async def main():
-    await dp.start_polling(bot)
+# ============================
+# Webhook handler
+# ============================
+
+async def handle_webhook(request: web.Request):
+    if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
+        return web.Response(status=403)
+
+    update = Update.model_validate(await request.json())
+    await dp.feed_update(bot, update)
+    return web.Response()
+
+# ============================
+# Startup / Shutdown
+# ============================
+
+async def on_startup(app):
+    webhook_url = f"https://{RENDER_HOST}{WEBHOOK_PATH}"
+    await bot.set_webhook(
+        webhook_url,
+        secret_token=WEBHOOK_SECRET,
+    )
+    print("Webhook set to:", webhook_url)
+
+async def on_shutdown(app):
+    await bot.delete_webhook()
+    await bot.session.close()
+
+# ============================
+# App factory
+# ============================
+
+def create_app():
+    app = web.Application()
+    app.router.add_post(WEBHOOK_PATH, handle_webhook)
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+    return app
+
+# ============================
+# Run
+# ============================
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    app = create_app()
+    web.run_app(
+        app,
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", 10000))
+    )
