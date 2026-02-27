@@ -1,4 +1,5 @@
 import asyncio
+import os
 import sqlite3
 from datetime import datetime, timedelta
 import pandas as pd
@@ -10,7 +11,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 
-API_TOKEN = "8680938005:AAHLoCiLCkiCdsprr6bjSyjx11zLnHTejD0"
+API_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
