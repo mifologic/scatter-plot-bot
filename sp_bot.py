@@ -79,7 +79,8 @@ def main_menu():
         keyboard=[
             [KeyboardButton(text="➕ Добавить запись")],
             [KeyboardButton(text="📊 Сформировать отчёт")],
-            [KeyboardButton(text="⚙️ Категории")]
+            [KeyboardButton(text="⚙️ Категории")],
+            [KeyboardButton(text="🔄 Перезапустить бот")]
         ],
         resize_keyboard=True
     )
@@ -309,6 +310,20 @@ async def add_category_name(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(f"Категория '{message.text}' добавлена в {category_type}.", reply_markup=main_menu())
 
+
+# ----------------------
+# Перезапуск бота
+# ----------------------
+@dp.message(F.text == "🔄 Перезапустить бот")
+async def reset_user_data(message: Message):
+    user_id = message.from_user.id
+    # Удаляем только записи (выбранные значения) текущего пользователя
+    cursor.execute("DELETE FROM records WHERE user_id = ?", (user_id,))
+    conn.commit()
+    await message.answer(
+        "Ваши записи были очищены. Вы можете начать заново.",
+        reply_markup=main_menu()
+    )
 
 # ----------------------
 # Запуск
