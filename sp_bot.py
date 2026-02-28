@@ -5,23 +5,19 @@ import pandas as pd
 import os
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import (
-    Message,
-    ReplyKeyboardMarkup,
-    KeyboardButton,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup, \
+    Update
 from aiogram.types.input_file import FSInputFile
 from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiohttp import web
 
-# ----------------------
-# Токен
-# ----------------------
 API_TOKEN = os.getenv("TELEGRAM_TOKEN")
+WEBHOOK_PATH = f"/webhook/{API_TOKEN}"
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "secret-key")
+RAILWAY_HOST = os.getenv("RAILWAY_STATIC_URL") or os.getenv("RENDER_EXTERNAL_HOSTNAME")
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -42,7 +38,6 @@ CREATE TABLE IF NOT EXISTS records (
     consequence TEXT
 )
 """)
-
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS antecedents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,7 +45,6 @@ CREATE TABLE IF NOT EXISTS antecedents (
     name TEXT
 )
 """)
-
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS behaviors (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,7 +52,6 @@ CREATE TABLE IF NOT EXISTS behaviors (
     name TEXT
 )
 """)
-
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS consequences (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -66,7 +59,6 @@ CREATE TABLE IF NOT EXISTS consequences (
     name TEXT
 )
 """)
-
 conn.commit()
 
 # ----------------------
@@ -103,12 +95,12 @@ async def start(message: Message):
     await message.answer("Главное меню:", reply_markup=main_menu())
 
 # ----------------------
-# Загрузка категорий
+# Загрузка категорий для пользователя
 # ----------------------
 def load_categories(table: str, user_id: int):
     cursor.execute(f"SELECT name FROM {table} WHERE user_id = ?", (user_id,))
     user_rows = [r[0] for r in cursor.fetchall()]
-
+    # стандартные категории
     default_rows = []
     if table == "antecedents":
         default_rows = [
@@ -136,7 +128,6 @@ def load_categories(table: str, user_id: int):
             "Корректирующая обратная связь",
             "Предоставление желаемого",
         ]
-
     return default_rows + user_rows
 
 # ----------------------
@@ -147,12 +138,10 @@ async def add_record(message: Message, state: FSMContext):
     await state.clear()
     user_id = message.from_user.id
     antecedents = load_categories("antecedents", user_id)
-
     kb = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text=a)] for a in antecedents],
         resize_keyboard=True
     )
-
     await state.set_state(RecordStates.antecedent)
     await message.answer("Выберите антецедент:", reply_markup=kb)
 
@@ -161,12 +150,10 @@ async def choose_behavior(message: Message, state: FSMContext):
     await state.update_data(antecedent=message.text)
     user_id = message.from_user.id
     behaviors = load_categories("behaviors", user_id)
-
     kb = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text=b)] for b in behaviors],
         resize_keyboard=True
     )
-
     await state.set_state(RecordStates.behavior)
     await message.answer("Выберите поведение:", reply_markup=kb)
 
@@ -175,73 +162,318 @@ async def choose_consequence(message: Message, state: FSMContext):
     await state.update_data(behavior=message.text)
     user_id = message.from_user.id
     consequences = load_categories("consequences", user_id)
-
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=c, callback_data=f"cons:{c}")]
-            for c in consequences
+            [InlineKeyboardButton(text=c, callback_data=f"cons:{c}")] for c in consequences
         ] + [[InlineKeyboardButton(text="✅ Готово", callback_data="cons:done")]]
     )
-
     await state.update_data(selected_consequences=[])
     await state.set_state(RecordStates.consequence)
     await message.answer("Выберите последствия (можно несколько):", reply_markup=kb)
 
 # ----------------------
-# Callback последствий
+# Множественный выбор последствий
 # ----------------------
 @dp.callback_query(F.data.startswith("cons:"))
 async def process_consequence(callback, state: FSMContext):
     data = await state.get_data()
     selected = data.get("selected_consequences", [])
     value = callback.data.split(":", 1)[1]
-
     if value == "done":
         if not selected:
             await callback.message.answer("Выберите хотя бы одно последствие.")
             return
-
         await state.update_data(consequence="; ".join(selected))
         user_id = callback.from_user.id
         record_data = await state.get_data()
-
         current_dt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
         cursor.execute("""
             INSERT INTO records (user_id, datetime, antecedent, behavior, consequence)
             VALUES (?, ?, ?, ?, ?)
-        """, (
-            user_id,
-            current_dt,
-            record_data["antecedent"],
-            record_data["behavior"],
-            record_data["consequence"]
-        ))
-
+        """, (user_id, current_dt, record_data["antecedent"], record_data["behavior"], record_data["consequence"]))
         conn.commit()
         await state.clear()
-
-        await callback.message.answer(
-            f"Запись сохранена ✅\nВремя эпизода: {current_dt}",
-            reply_markup=main_menu()
-        )
+        await callback.message.answer(f"Запись сохранена ✅\nВремя эпизода: {current_dt}", reply_markup=main_menu())
     else:
         if value in selected:
             selected.remove(value)
         else:
             selected.append(value)
-
         await state.update_data(selected_consequences=selected)
-        await callback.answer(
-            f"Выбрано: {', '.join(selected) if selected else 'ничего'}"
-        )
+        await callback.answer(f"Выбрано: {', '.join(selected) if selected else 'ничего'}")
 
 # ----------------------
-# Запуск через polling
+# Формирование отчёта
 # ----------------------
-async def main():
+@dp.message(F.text == "📊 Сформировать отчёт")
+async def generate_report(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=14)
+
+    df = pd.read_sql_query("""
+        SELECT * FROM records
+        WHERE user_id = ? AND datetime BETWEEN ? AND ?
+    """, conn, params=(
+        user_id,
+        start_date.strftime("%Y-%m-%d 00:00:00"),
+        end_date.strftime("%Y-%m-%d 23:59:59")
+    ))
+
+    if df.empty:
+        await message.answer("За последние 15 дней данных нет.")
+        return
+
+    # уникальная колонка на каждую запись
+    df["column"] = pd.to_datetime(df["datetime"]).dt.strftime("%d.%m-%H:%M:%S")
+    rows = load_categories("antecedents", user_id) + ["ПОВЕДЕНИЕ"] + load_categories("behaviors", user_id) + ["ПОСЛЕДСТВИЯ"] + load_categories("consequences", user_id)
+    columns = df["column"].tolist()
+    result = pd.DataFrame("", index=rows, columns=columns)
+
+    for _, row in df.iterrows():
+        col = row["column"]
+        result.at[row["antecedent"], col] = "●"
+        result.at[row["behavior"], col] = "●"
+        for cons in row["consequence"].split("; "):
+            result.at[cons, col] = "●"
+
+    file_name = f"scatter_report_{user_id}.xlsx"
+    with pd.ExcelWriter(file_name, engine="xlsxwriter") as writer:
+        result.to_excel(writer, sheet_name="Отчёт")
+        workbook  = writer.book
+        worksheet = writer.sheets["Отчёт"]
+        bold_format = workbook.add_format({'bold': True})
+        for i, idx in enumerate(result.index):
+            if idx in ["ПОВЕДЕНИЕ", "ПОСЛЕДСТВИЯ"]:
+                worksheet.write(i + 1, 0, idx, bold_format)
+        for i, col_name in enumerate(result.columns, start=1):
+            worksheet.set_column(i, i, 12)
+        for i in range(len(result.index)):
+            worksheet.set_row(i + 1, 20)
+
+    # Отправка через FSInputFile
+    xlsx_file = FSInputFile(file_name)
+    await message.answer_document(document=xlsx_file, caption="Отчёт за последние 15 дней")
+
+# ----------------------
+# Управление категориями
+# ----------------------
+@dp.message(F.text == "⚙️ Категории")
+async def manage_categories(message: Message):
+    kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="➕ Добавить категорию")],
+            [KeyboardButton(text="🗑 Удалить категорию")],
+            [KeyboardButton(text="❌ Удалить ВСЕ мои категории")],
+            [KeyboardButton(text="⬅️ Назад")]
+        ],
+        resize_keyboard=True
+    )
+    await message.answer("Управление категориями:", reply_markup=kb)
+
+@dp.message(F.text == "➕ Добавить категорию")
+async def add_category_start(message: Message, state: FSMContext):
+    kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Антецедент"), KeyboardButton(text="Поведение"), KeyboardButton(text="Последствие")],
+            [KeyboardButton(text="⬅️ Отмена")]
+        ],
+        resize_keyboard=True
+    )
+    await state.set_state(RecordStates.add_category_type)
+    await message.answer("Выберите тип категории:", reply_markup=kb)
+
+@dp.message(RecordStates.add_category_type)
+async def add_category_type(message: Message, state: FSMContext):
+    if message.text == "⬅️ Отмена":
+        await state.clear()
+        await message.answer("Отмена добавления категории.", reply_markup=main_menu())
+        return
+    if message.text not in ["Антецедент", "Поведение", "Последствие"]:
+        await message.answer("Выберите корректный тип категории.")
+        return
+    await state.update_data(new_category_type=message.text)
+    await state.set_state(RecordStates.add_category_name)
+    await message.answer("Введите название новой категории:")
+
+@dp.message(RecordStates.add_category_name)
+async def add_category_name(message: Message, state: FSMContext):
+    if message.text == "⬅️ Отмена":
+        await state.clear()
+        await message.answer("Отмена добавления категории.", reply_markup=main_menu())
+        return
+    data = await state.get_data()
+    category_type = data["new_category_type"]
+    table = "antecedents" if category_type=="Антецедент" else "behaviors" if category_type=="Поведение" else "consequences"
+    user_id = message.from_user.id
+    cursor.execute(f"INSERT INTO {table} (user_id, name) VALUES (?, ?)", (user_id, message.text))
+    conn.commit()
+    await state.clear()
+    await message.answer(f"Категория '{message.text}' добавлена в {category_type}.", reply_markup=main_menu())
+
+@dp.message(F.text == "❌ Удалить ВСЕ мои категории")
+async def delete_all_categories(message: Message):
+    user_id = message.from_user.id
+
+    cursor.execute("DELETE FROM antecedents WHERE user_id = ?", (user_id,))
+    cursor.execute("DELETE FROM behaviors WHERE user_id = ?", (user_id,))
+    cursor.execute("DELETE FROM consequences WHERE user_id = ?", (user_id,))
+    conn.commit()
+
+    await message.answer(
+        "Все ваши добавленные категории удалены.\n"
+        "Стандартные категории сохранены.",
+        reply_markup=main_menu()
+    )
+
+@dp.message(F.text == "🗑 Удалить категорию")
+async def delete_category_start(message: Message, state: FSMContext):
+    kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Антецедент"), KeyboardButton(text="Поведение"), KeyboardButton(text="Последствие")],
+            [KeyboardButton(text="⬅️ Отмена")]
+        ],
+        resize_keyboard=True
+    )
+    await state.set_state(RecordStates.delete_category_type)
+    await message.answer("Выберите тип категории для удаления:", reply_markup=kb)
+
+
+@dp.message(RecordStates.delete_category_type)
+async def delete_category_type(message: Message, state: FSMContext):
+    if message.text == "⬅️ Отмена":
+        await state.clear()
+        await message.answer("Удаление отменено.", reply_markup=main_menu())
+        return
+
+    if message.text not in ["Антецедент", "Поведение", "Последствие"]:
+        await message.answer("Выберите корректный тип.")
+        return
+
+    await state.update_data(delete_category_type=message.text)
+
+    table = (
+        "antecedents" if message.text == "Антецедент"
+        else "behaviors" if message.text == "Поведение"
+        else "consequences"
+    )
+
+    user_id = message.from_user.id
+    cursor.execute(f"SELECT name FROM {table} WHERE user_id = ?", (user_id,))
+    categories = [row[0] for row in cursor.fetchall()]
+
+    if not categories:
+        await state.clear()
+        await message.answer("У вас нет добавленных категорий этого типа.", reply_markup=main_menu())
+        return
+
+    kb = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=c)] for c in categories] + [[KeyboardButton(text="⬅️ Отмена")]],
+        resize_keyboard=True
+    )
+
+    await state.set_state(RecordStates.delete_category_name)
+    await message.answer("Выберите категорию для удаления:", reply_markup=kb)
+
+
+@dp.message(RecordStates.delete_category_name)
+async def delete_category_name(message: Message, state: FSMContext):
+    if message.text == "⬅️ Отмена":
+        await state.clear()
+        await message.answer("Удаление отменено.", reply_markup=main_menu())
+        return
+
+    data = await state.get_data()
+    category_type = data["delete_category_type"]
+
+    table = (
+        "antecedents" if category_type == "Антецедент"
+        else "behaviors" if category_type == "Поведение"
+        else "consequences"
+    )
+
+    user_id = message.from_user.id
+
+    cursor.execute(
+        f"DELETE FROM {table} WHERE user_id = ? AND name = ?",
+        (user_id, message.text)
+    )
+    conn.commit()
+
+    await state.clear()
+    await message.answer(
+        f"Категория '{message.text}' удалена.",
+        reply_markup=main_menu()
+    )
+
+# ----------------------
+# Перезапуск бота (очистка только записей)
+# ----------------------
+@dp.message(F.text == "🔄 Перезапустить бот")
+async def reset_user_data(message: Message):
+    user_id = message.from_user.id
+    cursor.execute("DELETE FROM records WHERE user_id = ?", (user_id,))
+    conn.commit()
+    await message.answer("Ваши записи были очищены. Вы можете начать заново.", reply_markup=main_menu())
+
+# ----------------------
+# Запуск
+# ----------------------
+# ----------------------
+# Webhook handler
+# ----------------------
+async def handle_webhook(request: web.Request):
+    if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
+        return web.Response(status=403)
+    update = Update.model_validate(await request.json())
+    await dp.feed_update(bot, update)
+    return web.Response()
+
+# ----------------------
+# Ping endpoint для «будильника» контейнера
+# ----------------------
+async def ping(request):
+    return web.Response(text="I'm alive!")
+
+# ----------------------
+# Startup / Shutdown
+# ----------------------
+async def on_startup(app):
+    # Настраиваем webhook только если хост задан
+    if RAILWAY_HOST:
+        webhook_url = f"https://{RAILWAY_HOST}{WEBHOOK_PATH}"
+        await bot.set_webhook(webhook_url, secret_token=WEBHOOK_SECRET)
+        print("Webhook set to:", webhook_url)
+
+async def on_shutdown(app):
+    await bot.delete_webhook()
+    await bot.session.close()
+
+# ----------------------
+# App factory
+# ----------------------
+def create_app():
+    app = web.Application()
+    # Webhook
+    app.router.add_post(WEBHOOK_PATH, handle_webhook)
+    # Ping endpoint
+    app.router.add_get("/ping", ping)
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+    return app
+
+# ----------------------
+# Run: aiohttp + polling parallel (опционально)
+# ----------------------
+async def start_polling():
+    # Только если ты хочешь дополнительный polling
+    # Можно убрать, если хочешь полностью webhook
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    app = create_app()
+    loop = asyncio.get_event_loop()
+    # Запускаем polling как таск, чтобы Telegram сообщения не терялись
+    loop.create_task(start_polling())
+    web.run_app(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
