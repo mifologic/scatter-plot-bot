@@ -1,0 +1,1 @@
+worker: python sp_bot.py
