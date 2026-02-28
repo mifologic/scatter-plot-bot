@@ -467,6 +467,4 @@ def create_app():
 
 if __name__ == "__main__":
     app = create_app()
-    loop = asyncio.get_event_loop()
-    # Запускаем polling как таск, чтобы Telegram сообщения не терялись
     web.run_app(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
