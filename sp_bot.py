@@ -25,7 +25,7 @@ dp = Dispatcher(storage=MemoryStorage())
 # ----------------------
 # База данных
 # ----------------------
-conn = sqlite3.connect("data.db")
+conn = sqlite3.connect("data.db", check_same_thread=False)
 cursor = conn.cursor()
 
 cursor.execute("""
@@ -237,7 +237,7 @@ async def generate_report(message: Message, state: FSMContext):
         for cons in row["consequence"].split("; "):
             result.at[cons, col] = "●"
 
-    file_name = f"scatter_report_{user_id}.xlsx"
+    file_name = f"/tmp/scatter_report_{user_id}.xlsx"
     with pd.ExcelWriter(file_name, engine="xlsxwriter") as writer:
         result.to_excel(writer, sheet_name="Отчёт")
         workbook  = writer.book
@@ -254,6 +254,7 @@ async def generate_report(message: Message, state: FSMContext):
     # Отправка через FSInputFile
     xlsx_file = FSInputFile(file_name)
     await message.answer_document(document=xlsx_file, caption="Отчёт за последние 15 дней")
+    os.remove(file_name)
 
 # ----------------------
 # Управление категориями
@@ -462,18 +463,10 @@ def create_app():
     app.on_shutdown.append(on_shutdown)
     return app
 
-# ----------------------
-# Run: aiohttp + polling parallel (опционально)
-# ----------------------
-async def start_polling():
-    # Только если ты хочешь дополнительный polling
-    # Можно убрать, если хочешь полностью webhook
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     app = create_app()
     loop = asyncio.get_event_loop()
     # Запускаем polling как таск, чтобы Telegram сообщения не терялись
-    loop.create_task(start_polling())
     web.run_app(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
